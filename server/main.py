@@ -32,7 +32,7 @@ def run_flask_app():
 
     logger.info("Starting Flask server...")
     try:
-        api.app.run(host="0.0.0.0", port=5001, debug=False, use_reloader=False)
+        api.socketio.run(api.app, host="0.0.0.0", port=5001, debug=False, use_reloader=False)
         logger.info("Flask server started")
     except Exception as exception:
         logger.error(f"Failed to start Flask server: {str(exception)}", exc_info=True)

@@ -16,7 +16,7 @@ import sys
 import os
 import threading
 import subprocess
-from error_codes import *
+from flask_socketio import SocketIO, emit
 
 # Initialize logger for this module
 logger = logging.getLogger(__name__)
@@ -25,12 +25,14 @@ app = Flask(__name__)
 # Initialize tracer
 tracer = trace.get_tracer(__name__)
 
+# Initialize SocketIO
+socketio = SocketIO(app)
 
-def success_response(message=None, data=None):
+
+def success_response(data=None):
     """Create a standardized success response.
 
     Args:
-        message (str, optional): A message to include in the response. Defaults to None.
         data (dict, optional): The data to include in the response. Defaults to None.
 
     Returns:
@@ -38,30 +40,25 @@ def success_response(message=None, data=None):
     """
     response = {
         "status": "success",
-        "message": message,
         "data": data or {},
-        "timestamp": datetime.datetime.utcnow().isoformat(),
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
     return jsonify(response), 200
 
 
-def error_response(message, status_code=400, error_code=None):
+def error_response(reason, status_code=400):
     """Create a standardized error response.
 
     Args:
-        message (str): A human-readable error message.
-        status_code (int): The HTTP status code to return.
-        error_code (str, optional): A machine-readable error code. Defaults to None.
+        reason (str): A human-readable error message.
+        status_code (int, optional): The HTTP status code to return. Defaults to 400.
 
     Returns:
         tuple: A tuple containing the JSON response and HTTP status code.
     """
     response = {
         "status": "error",
-        "message": message,
-        "error": {
-            "code": error_code or f"ERROR_{status_code}",
-        },
+        "reason": reason,
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
     return jsonify(response), status_code
@@ -80,17 +77,14 @@ def get_entity(entity_id):
         JSON response containing the entity's components and their values.
     """
     try:
-        logger.debug(f"Processing request to retrieve entity #{entity_id}")
+        logger.debug(f"Processing request to retrieve entity {entity_id}")
 
         with world_lock:
             if not world.entity_exists(entity_id):
-                logger.warning(
-                    f"Attempted to retrieve non-existent entity #{entity_id}"
-                )
+                logger.warning(f"Attempted to retrieve non-existent entity {entity_id}")
                 return error_response(
-                    message=f"Entity #{entity_id} does not exist",
+                    reason=f"Entity {entity_id} does not exist",
                     status_code=404,
-                    error_code=ENTITY_NOT_FOUND,
                 )
 
             entity_info = {
@@ -118,23 +112,18 @@ def get_entity(entity_id):
                         field: getattr(component_value, field) for field in fields
                     }
 
-            logger.info(
-                f"Retrieved entity #{entity_id} with "
-                f"{len(entity_info['components'])} components"
-            )
-            return success_response(
-                message=f"Retrieved entity #{entity_id}", data=entity_info
-            )
+            return success_response(data=entity_info)
 
     except Exception as exception:
-        error_message = f"Failed to retrieve entity #{entity_id}"
+        error_message = f"Failed to retrieve entity {entity_id}"
         logger.error(f"{error_message}: {str(exception)}", exc_info=True)
         return error_response(
-            message=error_message, status_code=500, error_code=INTERNAL
+            reason=error_message,
+            status_code=500,
         )
 
 
-def validate_add_component_request(parameters):
+def validate_add_component_to_entity_request(parameters):
     """Validate the parameters for adding a component to an entity.
 
     Args:
@@ -163,7 +152,7 @@ def validate_add_component_request(parameters):
         ):
             return (
                 False,
-                "Position, rotation, and scale must be arrays of three numbers",
+                "position, rotation, and scale must be arrays of three numbers",
             )
 
     return True, None
@@ -177,21 +166,15 @@ def handle_transform(entity_id, component_data):
     with world_lock:
         if not world.entity_exists(entity_id):
             return error_response(
-                f"Entity #{entity_id} not found", 404, ENTITY_NOT_FOUND
+                reason=f"Entity {entity_id} not found", status_code=404
             )
 
-        world.add_component(entity_id, Transform(position, rotation, scale))
-        logger.info(
-            f"Added Transform component to entity #{entity_id} with data {component_data}"
-        )
-        return success_response(
-            message=f"Transform component added to entity #{entity_id}",
-            data=component_data,
-        )
+        world.add_component_to_entity(entity_id, Transform(position, rotation, scale))
+        return success_response(data=world.component_for_entity(entity_id, Transform))
 
 
-@app.route("/add_component/<int:entity_id>", methods=["POST"])
-def add_component(entity_id):
+@app.route("/add_component_to_entity/<int:entity_id>", methods=["POST"])
+def add_component_to_entity(entity_id):
     """Add a component to an existing entity.
 
     This endpoint accepts a JSON payload with the component type and its parameters,
@@ -203,16 +186,17 @@ def add_component(entity_id):
     Returns:
         JSON response indicating the result of the operation.
     """
-    with tracer.start_as_current_span("add_component"):
+    with tracer.start_as_current_span("add_component_to_entity"):
         try:
             parameters = request.json
             if parameters is None:
-                return error_response("Invalid JSON request", 400, INVALID_JSON_REQUEST)
+                return error_response(reason="Invalid JSON request", status_code=400)
 
-            # Validate the request parameters
-            is_valid, error_message = validate_add_component_request(parameters)
+            is_valid, error_message = validate_add_component_to_entity_request(
+                parameters
+            )
             if not is_valid:
-                return error_response(error_message, 400, UNSUPPORTED_COMPONENT_TYPE)
+                return error_response(reason=error_message, status_code=400)
 
             component_type = parameters.get("type")
             component_data = parameters.get("data")
@@ -226,15 +210,15 @@ def add_component(entity_id):
                 return action()  # Call the corresponding function
             else:
                 return error_response(
-                    "Unsupported component type", 400, UNSUPPORTED_COMPONENT_TYPE
+                    reason="Unsupported component type", status_code=400
                 )
 
         except Exception as exception:
             logger.error(
-                f"Error adding component to entity #{entity_id}: {str(exception)}",
+                f"Error adding component to entity {entity_id}: {str(exception)}",
                 exc_info=True,
             )
-            return error_response(str(exception), 400, INTERNAL)
+            return error_response(reason=str(exception), status_code=500)
 
 
 @app.route("/create_entity", methods=["POST"])
@@ -248,27 +232,24 @@ def create_entity():
     """
     parameters = request.json
     if parameters is None:
-        return error_response("Invalid JSON request", 400, INVALID_JSON_REQUEST)
+        return error_response(reason="Invalid JSON request", status_code=400)
 
-    # Extract parameters with defaults
     name_data = parameters.get("name")
     target_scene_data = parameters.get("targetScene")
     tags_data = parameters.get("tags")
 
     if not target_scene_data or not name_data or tags_data is None:
         return error_response(
-            "name, targetScene, and tags are required", 400, INVALID_JSON_REQUEST
+            reason="name, targetScene, and tags are required", status_code=400
         )
 
     with world_lock:
-        # Create the entity with the provided or default components
         entity_id = world.create_entity(
             Name(name_data),
             TargetScene(target_scene_data),
             Tags(tags_data),
         )
-        logger.info(f"Created entity #{entity_id}")
-        return success_response(f"Entity #{entity_id} created", {"entityId": entity_id})
+        return success_response(data={"entityId": entity_id})
 
 
 @app.route("/remove_entity/<int:entity_id>", methods=["DELETE"])
@@ -286,12 +267,11 @@ def remove_entity(entity_id):
     with world_lock:
         if not world.entity_exists(entity_id):
             return error_response(
-                f"Entity #{entity_id} not found", 404, ENTITY_NOT_FOUND
+                reason=f"Entity {entity_id} not found", status_code=404
             )
 
         world.delete_entity(entity_id)
-        logger.info(f"Removed entity #{entity_id}")
-        return success_response(f"Entity #{entity_id} removed")
+        return success_response()
 
 
 @app.route("/shutdown", methods=["POST"])
@@ -304,5 +284,31 @@ def shutdown():
         JSON response indicating the result of the operation.
     """
     threading.Thread(target=pyglet.app.exit).start()
-    logger.info("Server shutting down...")
-    return success_response("Server shutting down...")
+    return success_response()
+
+
+@app.route("/status", methods=["GET"])
+def status():
+    """Check the server status."""
+    return success_response()
+
+
+@socketio.on("request_status")
+def handle_status_request():
+    """Handle WebSocket status request."""
+    try:
+        response = {
+            "status": "success",
+            "data": {},
+            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        }
+        emit("status_response", response)
+    except Exception as exception:
+        emit(
+            "status_response",
+            {
+                "status": "error",
+                "reason": str(exception),
+                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            },
+        )
