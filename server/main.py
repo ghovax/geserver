@@ -10,6 +10,8 @@ import pyglet
 from configuration import setup_logging, setup_opentelemetry
 from opentelemetry.instrumentation.flask import FlaskInstrumentor
 import api
+import signal
+import sys
 
 # Configure logging at startup
 setup_logging()
@@ -19,23 +21,21 @@ logger = logging.getLogger(__name__)
 # Instrument the Flask app
 FlaskInstrumentor().instrument_app(api.app)
 
+# Create an event to signal the Flask server to stop
+stop_event = threading.Event()
 
 def run_flask_app():
-    """Start the Flask API server in a separate thread.
-
-    This function initializes the Flask application and runs it on the specified host and port.
-    """
+    """Start the Flask API server in a separate thread."""
     werkzeug_logger = logging.getLogger("werkzeug")
     werkzeug_logger.handlers = []
     werkzeug_logger.propagate = True
 
     logger.info("Starting Flask server...")
     try:
-        api.app.run(host="0.0.0.0", port=5003, debug=False, use_reloader=False)
+        api.app.run(host="0.0.0.0", port=5001, debug=False, use_reloader=False)
         logger.info("Flask server started")
     except Exception as exception:
         logger.error(f"Failed to start Flask server: {str(exception)}", exc_info=True)
-
 
 if __name__ == "__main__":
     # Start Flask in a separate thread
@@ -43,7 +43,4 @@ if __name__ == "__main__":
     flask_thread.start()
 
     # Start Pyglet event loop in the main thread
-    # This will block until the application is closed
     pyglet.app.run()
-
-    logger.info("Shutting down...")
