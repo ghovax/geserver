@@ -26,7 +26,7 @@ app = Flask(__name__)
 tracer = trace.get_tracer(__name__)
 
 # Initialize SocketIO
-socketio = SocketIO(app)
+socketio = SocketIO(app, async_mode="eventlet")
 
 
 def success_response(data=None):

@@ -94,6 +94,7 @@ def setup_logging():
     """
     format_str = "%(levelname)s:%(name)s:%(message)s"
     colored_formatter = ColoredFormatter(format_str)
+    
     stream_handler = logging.StreamHandler()
     stream_handler.setFormatter(colored_formatter)
 
