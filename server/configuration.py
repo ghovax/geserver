@@ -9,17 +9,11 @@ import os
 import ctypes.util
 import threading
 import esper
-from opentelemetry import trace
-
-# Import the OTLP exporter
-from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-from opentelemetry.sdk.resources import Resource
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
 # Global objects and their locks
 world_lock = threading.Lock()
-world = esper.World()
+esper.switch_world("default")  # Set the active world context
+
 window_lock = threading.Lock()
 window = None
 
@@ -94,11 +88,11 @@ def setup_logging():
     """
     format_str = "%(levelname)s:%(name)s:%(message)s"
     colored_formatter = ColoredFormatter(format_str)
-    
+
     stream_handler = logging.StreamHandler()
     stream_handler.setFormatter(colored_formatter)
 
-    logging.basicConfig(level=logging.DEBUG, handlers=[stream_handler])
+    logging.basicConfig(level=logging.WARNING, handlers=[stream_handler])
 
     # Configure Flask's logger
     flask_logger = logging.getLogger("werkzeug")
@@ -107,15 +101,3 @@ def setup_logging():
     # Configure PyAssimp logger
     pyassimp_logger = logging.getLogger("pyassimp")
     pyassimp_logger.setLevel(logging.INFO)
-
-
-def setup_opentelemetry():
-    """Set up OpenTelemetry for tracing."""
-    resource = Resource.create({"service.name": "entity-system"})
-    trace.set_tracer_provider(TracerProvider(resource=resource))
-    tracer_provider = trace.get_tracer_provider()
-
-    # Configure the OTLP exporter
-    otlp_exporter = OTLPSpanExporter()
-    span_processor = BatchSpanProcessor(otlp_exporter)
-    tracer_provider.add_span_processor(span_processor)
