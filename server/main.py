@@ -7,24 +7,14 @@ This module sets up logging, starts the Flask API server, and runs the Pyglet ev
 import logging
 import threading
 import pyglet
-from server.configuration import setup_logging
 import server.api as api
-import signal
-import sys
-
-# Basic logging configuration
-logging.basicConfig(level=logging.INFO)
 
 # Configure logging at startup
-setup_logging()
 logger = logging.getLogger(__name__)
-
-# Create an event to signal the Flask server to stop
-stop_event = threading.Event()
 
 
 def run_flask_app():
-    """Start the Flask API server in a separate thread."""
+    # Start the Flask API server in a separate thread
     werkzeug_logger = logging.getLogger("werkzeug")
     werkzeug_logger.handlers = []
     werkzeug_logger.propagate = True

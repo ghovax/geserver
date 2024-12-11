@@ -20,7 +20,7 @@ class Transform:
 
 @dataclass
 class CoreProperties:
-    """Represents a base entity."""
+    """Represents the core properties of an entity."""
 
     name: str  # Name of the entity
     tags: List[str]  # List of tags associated with the entity
@@ -29,6 +29,6 @@ class CoreProperties:
 
 @dataclass
 class Script:
-    """Represents a script component that references a Python script."""
-    
+    """Represents a script component that references a Python script to be executed."""
+
     script_path: str  # Path to the script to be executed

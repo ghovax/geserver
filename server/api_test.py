@@ -1,7 +1,5 @@
 import unittest
 from server.api import app
-from server import *
-
 
 class APITestCase(unittest.TestCase):
     def setUp(self):
@@ -10,7 +8,6 @@ class APITestCase(unittest.TestCase):
         self.reset_server()
 
     def reset_server(self):
-        """Helper method to reset the server state."""
         response = self.app.post("/reset")
         self.assertEqual(response.status_code, 200, "Failed to reset the server")
 
