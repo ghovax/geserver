@@ -34,7 +34,6 @@ class APITestCase(unittest.TestCase):
             {
                 "data": {
                     "position": [0.0, 0.0, 0.0],
-                    "rotation": [0.0, 0.0, 0.0],
                     "scale": [1.0, 1.0, 1.0],
                 }
             },  # Missing type
@@ -42,7 +41,6 @@ class APITestCase(unittest.TestCase):
                 "type": "invalid_type",
                 "data": {
                     "position": [0.0, 0.0, 0.0],
-                    "rotation": [0.0, 0.0, 0.0],
                     "scale": [1.0, 1.0, 1.0],
                 },
             },  # Invalid type
@@ -51,7 +49,6 @@ class APITestCase(unittest.TestCase):
                 "type": "transform",
                 "data": {
                     "position": [1e7, 1e7, 1e7],
-                    "rotation": [0.0, 0.0, 0.0],
                     "scale": [1.0, 1.0, 1.0],
                 },
             },  # Excessive scale values
@@ -59,7 +56,6 @@ class APITestCase(unittest.TestCase):
                 "type": "transform",
                 "data": {
                     "position": ["not", "a", "number"],
-                    "rotation": [0.0, 0.0, 0.0],
                     "scale": [1.0, 1.0, 1.0],
                 },
             },  # Non-numeric position
@@ -89,7 +85,6 @@ class APITestCase(unittest.TestCase):
                 "type": "transform",
                 "data": {
                     "position": [0.0, 0.0, 0.0],
-                    "rotation": [0.0, 0.0, 0.0],
                     "scale": [1.0, 1.0, 1.0],
                 },
             },
@@ -121,7 +116,6 @@ class APITestCase(unittest.TestCase):
                 "type": "transform",
                 "data": {
                     "position": [1.0, 2.0, 3.0],
-                    "rotation": [0.0, 0.0, 0.0],
                     "scale": [1.0, 1.0, 1.0],
                 },
             },
