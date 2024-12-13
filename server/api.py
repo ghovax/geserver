@@ -135,7 +135,7 @@ def validate_transform_data(component_data):
         return False, "Transform data must be an object"
 
     # Check for unexpected fields
-    allowed_fields = {"position", "rotation", "scale"}
+    allowed_fields = {"position", "scale"} # TODO: Add rotation component, which is still not implemented because I don't know what the rotation axis is
     unexpected_fields = set(component_data.keys()) - allowed_fields
     if unexpected_fields:
         logger.warning(
@@ -146,7 +146,7 @@ def validate_transform_data(component_data):
             f"Unexpected fields in transform data: {', '.join(unexpected_fields)}",
         )
 
-    required_fields = ["position", "rotation", "scale"]
+    required_fields = ["position", "scale"] # TODO: Add the rotation component also here
     for field in required_fields:
         if field not in component_data:
             return False, f"Transform data is missing a required field: {field}"
@@ -301,6 +301,7 @@ def handle_script_component(entity_id, script: Script):
 
         logger.info(f"Script loaded: {script_name}")
         
+        # FIXME: What if it has both on_load and on_update? What if it has neither?
         script_info = {}
 
         # Check if the on_load function exists
@@ -312,9 +313,8 @@ def handle_script_component(entity_id, script: Script):
             script_module.on_load(entity_id)
 
             # Create a dictionary to hold the script path and module
-            script_info = {"path": script_path, "module": script_module}
-
-            # Append the dictionary to the global list in a thread-safe manner
+            # FIXME: Replace or append to the dictionary?
+            script_info = {"scriptPath": script_path, "scriptModule": script_module}
             
         if hasattr(script_module, "on_update"):
             logger.debug(
@@ -322,7 +322,21 @@ def handle_script_component(entity_id, script: Script):
             )
 
             # TODO: Make this a global timer that can be stopped and started
-            timer = vispy.app.Timer(interval=1/60, connect=script_module.on_update, start=True)  # 60 FPS callback
+            def on_update(event):
+                global meshes
+                # Fetch the mesh and shift it by the transform component
+                mesh = next((mesh for mesh in meshes if mesh["entityId"] == entity_id), None)
+                if mesh and mesh["toBeTranslated"] == True:
+                    transform = esper.component_for_entity(entity_id, Transform)
+                    with meshes_lock:
+                        mesh["meshObject"].transform.translate(tuple(transform.position))
+                        # TODO: Rotate the mesh by the rotation component, which aren't present yet
+                        mesh["meshObject"].transform.scale(tuple(transform.scale))
+                        mesh["toBeTranslated"] = False
+                
+                script_module.on_update(event)
+                
+            timer = vispy.app.Timer(interval=1/60, connect=on_update, start=True)  # 60 FPS callback
             script_info["timer"] = timer
             if "entityIds" not in script_info:
                 script_info["entityIds"] = []
@@ -370,6 +384,7 @@ def handle_renderer_component(entity_id, renderer: Renderer):
                 "entityId": entity_id,
                 "filePath": file_path,
                 "meshObject": mesh,
+                "toBeTranslated": True
             })
 
         # Check if vertices and faces are valid

@@ -16,7 +16,7 @@ class Transform:
     """Represents the transformation properties of an entity."""
 
     position: List[float]
-    rotation: List[float]
+    # TODO: Add the rotation component, whatever it is, what about the rotation axis?
     scale: List[float]
 
 
