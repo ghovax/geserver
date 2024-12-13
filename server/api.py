@@ -34,6 +34,7 @@ scripts_lock = Lock()  # Create a lock for thread-safe access
 meshes = []
 meshes_lock = Lock()  # Create a lock for thread-safe access
 
+
 # Create a success response
 def success_response(data=None):
     response = {
@@ -135,7 +136,10 @@ def validate_transform_data(component_data):
         return False, "Transform data must be an object"
 
     # Check for unexpected fields
-    allowed_fields = {"position", "scale"} # TODO: Add rotation component, which is still not implemented because I don't know what the rotation axis is
+    allowed_fields = {
+        "position",
+        "scale",
+    }  # TODO: Add rotation component, which is still not implemented because I don't know what the rotation axis is
     unexpected_fields = set(component_data.keys()) - allowed_fields
     if unexpected_fields:
         logger.warning(
@@ -146,7 +150,10 @@ def validate_transform_data(component_data):
             f"Unexpected fields in transform data: {', '.join(unexpected_fields)}",
         )
 
-    required_fields = ["position", "scale"] # TODO: Add the rotation component also here
+    required_fields = [
+        "position",
+        "scale",
+    ]  # TODO: Add the rotation component also here
     for field in required_fields:
         if field not in component_data:
             return False, f"Transform data is missing a required field: {field}"
@@ -254,12 +261,17 @@ def validate_add_component_to_entity_request(parameters):
 
 # Handle adding a transform component to an entity
 def handle_transform_component(entity_id, transform: Transform):
-    logger.info(f"Handling transform component for entity {entity_id}")
+    logger.debug(f"Handling transform component for entity {entity_id}")
     try:
         with world_lock:
-            logger.info(f"Acquired lock for entity {entity_id}")
+            logger.debug(f"Acquired lock for entity {entity_id}")
             esper.add_component(entity_id, transform)
             logger.info(f"Successfully added transform component to entity {entity_id}")
+            mesh = next(
+                (mesh for mesh in meshes if mesh["entityId"] == entity_id), None
+            )
+            if mesh:
+                mesh["toBeTransformed"] = True
             return success_response(
                 data=esper.component_for_entity(entity_id, Transform)
             )
@@ -271,7 +283,7 @@ def handle_transform_component(entity_id, transform: Transform):
 
 # Handle adding a script component to an entity
 def handle_script_component(entity_id, script: Script):
-    logger.info(f"Handling script component for entity {entity_id}")
+    logger.debug(f"Handling script component for entity {entity_id}")
     global scripts  # Declare the global variable
 
     script_path = script.script_path
@@ -289,7 +301,9 @@ def handle_script_component(entity_id, script: Script):
         with world_lock:
             if not esper.has_component(entity_id, Script):
                 esper.add_component(entity_id, Script(script_path))
-                logger.info(f"Script component added for entity {entity_id}")
+                logger.info(
+                    f"Script component added for entity {entity_id} with path {script_path}"
+                )
             else:
                 logger.warning(
                     f"Script component already exists for entity {entity_id}"
@@ -299,8 +313,6 @@ def handle_script_component(entity_id, script: Script):
                     status_code=400,
                 )
 
-        logger.info(f"Script loaded: {script_name}")
-        
         # FIXME: What if it has both on_load and on_update? What if it has neither?
         script_info = {}
 
@@ -315,7 +327,7 @@ def handle_script_component(entity_id, script: Script):
             # Create a dictionary to hold the script path and module
             # FIXME: Replace or append to the dictionary?
             script_info = {"scriptPath": script_path, "scriptModule": script_module}
-            
+
         if hasattr(script_module, "on_update"):
             logger.debug(
                 f"Script on_update function is found at: {script_module.on_update}"
@@ -325,23 +337,29 @@ def handle_script_component(entity_id, script: Script):
             def on_update(event):
                 global meshes
                 # Fetch the mesh and shift it by the transform component
-                mesh = next((mesh for mesh in meshes if mesh["entityId"] == entity_id), None)
-                if mesh and mesh["toBeTranslated"] == True:
+                mesh = next(
+                    (mesh for mesh in meshes if mesh["entityId"] == entity_id), None
+                )
+                if mesh and mesh["toBeTransformed"] == True:
                     transform = esper.component_for_entity(entity_id, Transform)
                     with meshes_lock:
-                        mesh["meshObject"].transform.translate(tuple(transform.position))
+                        mesh["meshObject"].transform.translate(
+                            tuple(transform.position)
+                        )
                         # TODO: Rotate the mesh by the rotation component, which aren't present yet
                         mesh["meshObject"].transform.scale(tuple(transform.scale))
-                        mesh["toBeTranslated"] = False
-                
+                        mesh["toBeTransformed"] = False
+
                 script_module.on_update(event)
-                
-            timer = vispy.app.Timer(interval=1/60, connect=on_update, start=True)  # 60 FPS callback
+
+            timer = vispy.app.Timer(
+                interval=1 / 60, connect=on_update, start=True
+            )  # 60 FPS callback
             script_info["timer"] = timer
             if "entityIds" not in script_info:
                 script_info["entityIds"] = []
             script_info["entityIds"].append(entity_id)
-            
+
         with scripts_lock:  # Acquire the lock
             scripts.append(script_info)  # Modify the list safely
 
@@ -353,7 +371,7 @@ def handle_script_component(entity_id, script: Script):
 
 
 def handle_renderer_component(entity_id, renderer: Renderer):
-    logger.info(f"Handling renderer component for entity {entity_id}")
+    logger.debug(f"Handling renderer component for entity {entity_id}")
     file_path = renderer.file_path
 
     # Validate that scene_path is provided
@@ -375,17 +393,27 @@ def handle_renderer_component(entity_id, renderer: Renderer):
 
         # Read mesh data
         vertices, faces, normals, _ = io.read_mesh(file_path)
-        mesh = scene.visuals.Mesh(vertices, faces, normals, shading='smooth', color=(0.6, 0.6, 1, 1), parent=view.scene)
+        mesh = scene.visuals.Mesh(
+            vertices,
+            faces,
+            normals,
+            shading="flat",
+            color=(1, 1, 1, 1),
+            parent=view.scene,
+        )
 
         from vispy.visuals.transforms import MatrixTransform
+
         mesh.transform = MatrixTransform()
         with meshes_lock:
-            meshes.append({
-                "entityId": entity_id,
-                "filePath": file_path,
-                "meshObject": mesh,
-                "toBeTranslated": True
-            })
+            meshes.append(
+                {
+                    "entityId": entity_id,
+                    "filePath": file_path,
+                    "meshObject": mesh,
+                    "toBeTransformed": True,
+                }
+            )
 
         # Check if vertices and faces are valid
         if len(vertices) == 0 or len(faces) == 0:  # Check if arrays are empty
@@ -417,7 +445,7 @@ def handle_renderer_component(entity_id, renderer: Renderer):
 
 def add_component_to_entity(entity_id, component):
     """Add a component to an existing entity."""
-    logger.info(f"Attempting to add component to entity {entity_id}")
+    logger.debug(f"Attempting to add component to entity {entity_id}")
 
     try:
         if not esper.entity_exists(entity_id):
@@ -574,29 +602,36 @@ def remove_entity(entity_id):
     logger.info(f"Attempting to remove entity {entity_id}")
     global meshes  # Declare the global variable
     global scripts
-    
+
     with world_lock:
         if not esper.entity_exists(entity_id):
             raise ValueError(f"Entity {entity_id} not found")
 
         esper.delete_entity(entity_id)
         with meshes_lock:
-            meshes_to_remove = [mesh for mesh in meshes if mesh["entityId"] == entity_id]
+            meshes_to_remove = [
+                mesh for mesh in meshes if mesh["entityId"] == entity_id
+            ]
             for mesh in meshes_to_remove:
                 from vispy.visuals.transforms import MatrixTransform
+
                 mesh["meshObject"].parent = None
                 mesh["meshObject"].transform = MatrixTransform()
-            meshes = [mesh for mesh in meshes if mesh["entityId"] != entity_id]  # Update the global meshes list
-            
+            meshes = [
+                mesh for mesh in meshes if mesh["entityId"] != entity_id
+            ]  # Update the global meshes list
+
         with scripts_lock:
-            scripts_to_remove = [script for script in scripts if entity_id in script["entityIds"]]
+            scripts_to_remove = [
+                script for script in scripts if entity_id in script["entityIds"]
+            ]
             for script in scripts_to_remove:
                 script["timer"].stop()
                 script["timer"].disconnect()
                 script["entityIds"].remove(entity_id)
-            scripts = [script for script in scripts if entity_id not in script["entityIds"]]  # Update the global scripts list
-
-        logger.info(f"Successfully removed entity {entity_id}")
+            scripts = [
+                script for script in scripts if entity_id not in script["entityIds"]
+            ]  # Update the global scripts list
 
 
 @flask_app.route("/remove_entity", methods=["DELETE"])

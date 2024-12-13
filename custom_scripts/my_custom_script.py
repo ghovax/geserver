@@ -15,7 +15,7 @@ def on_load(entity_id):
     local_entity_id = entity_id
 
     # Create a transform component
-    transform = Transform(position=[1, 2, 0], scale=[1, 1, 1])
+    transform = Transform(position=[1, 2, 0], scale=[0.5, 1, 1.5])
     api.add_component_to_entity(entity_id, transform)
 
     # Create a renderer component

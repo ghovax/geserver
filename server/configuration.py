@@ -11,7 +11,25 @@ import threading
 import logging
 
 # Basic logging configuration
-logging.basicConfig(level=logging.INFO)
+def colorize_levelname(levelname):
+    colors = {
+        'DEBUG': '\033[92m',  # Green
+        'INFO': '\033[94m',   # Blue
+        'WARNING': '\033[93m', # Yellow
+        'ERROR': '\033[91m',   # Red
+        'CRITICAL': '\033[95m' # Magenta
+    }
+    return colors.get(levelname, '\033[0m')  # Default to no color
+
+class ColoredFormatter(logging.Formatter):
+    def format(self, record):
+        levelname = record.levelname
+        record.levelname = f"{colorize_levelname(levelname)}{levelname}\033[0m"
+        return super().format(record)
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(name)s] %(levelname)s: %(message)s')
+for handler in logging.getLogger().handlers:
+    handler.setFormatter(ColoredFormatter('%(asctime)s [%(name)s] %(levelname)s: %(message)s'))
 
 logger = logging.getLogger(__name__)
 
