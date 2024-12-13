@@ -7,9 +7,9 @@ updating, retrieving, and removing entities, as well as managing the application
 
 import logging
 from flask import Flask, request, jsonify, abort
-from server.entity_components import CoreProperties, Transform, Script
+import vispy.app
+from server.entity_components import CoreProperties, Transform, Script, Renderer
 from server.configuration import world_lock
-import pyglet
 import datetime
 import os
 import threading
@@ -17,18 +17,22 @@ from flask_socketio import SocketIO, emit
 import esper
 import importlib.util
 from threading import Lock
+import re
 
 # Initialize logger for this module
 logger = logging.getLogger(__name__)
-app = Flask(__name__)
+flask_app = Flask(__name__)
 
 # Initialize SocketIO
-socketio = SocketIO(app, async_mode="eventlet")
+socketio = SocketIO(flask_app, async_mode="eventlet")
 
 # Global variable to hold the script modules
-script_modules = []
-script_modules_lock = Lock()  # Create a lock for thread-safe access
+scripts = []
+scripts_lock = Lock()  # Create a lock for thread-safe access
 
+# Global variable to hold the meshes
+meshes = []
+meshes_lock = Lock()  # Create a lock for thread-safe access
 
 # Create a success response
 def success_response(data=None):
@@ -50,21 +54,59 @@ def error_response(reason, status_code=400):
     return jsonify(response), status_code
 
 
-@app.route("/get_entity/<int:entity_id>", methods=["GET"])
-def get_entity(entity_id):
-    """Retrieve information about a specific entity.
+def get_entity_components(entity_id):
+    """Retrieve components for a specific entity."""
+    logger.debug(f"Retrieving components for entity {entity_id}")
+    entity_info = {"components": {}}
 
-    This endpoint returns the components and their values for the specified entity.
+    import importlib
 
-    Request JSON payload is empty.
+    # Import the entity_components module and get all the component types
+    entity_components = importlib.import_module("server.entity_components")
+    component_types = [
+        getattr(entity_components, class_name)
+        for class_name in dir(entity_components)
+        if not class_name.startswith("__")
+        and isinstance(getattr(entity_components, class_name), type)
+    ]
+    # Create a mapping of component types to their names and fields
+    component_mapping = {
+        class_object: (
+            class_object.__name__,
+            [field.name for field in class_object.__dataclass_fields__.values()],
+        )
+        for class_object in component_types
+    }
 
-    Args:
-        entity_id (int): The ID of the entity to retrieve.
+    # Iterate over the component mapping and retrieve the component values
+    for component_type, (key, fields) in component_mapping.items():
+        try:
+            if esper.has_component(entity_id, component_type):
+                component_value = esper.component_for_entity(entity_id, component_type)
+                entity_info["components"][key] = {
+                    "".join(
+                        x.capitalize() if i > 0 else x.lower()
+                        for i, x in enumerate(field.split("_"))
+                    ): getattr(component_value, field)
+                    for field in fields
+                }
+        except KeyError:
+            logger.warning(f"Entity {entity_id} does not have component {key}")
 
-    Returns:
-        JSON response containing the entity's components and their values.
-    """
+    return entity_info
+
+
+@flask_app.route("/get_entity_components", methods=["GET"])
+def get_entity_components_endpoint():
+    """Retrieve information about a specific entity."""
+    logger.info("Endpoint '/get_entity_components' called")
     try:
+        parameters = request.json
+        logger.debug(f"Request data: {parameters}")
+        if parameters is None:
+            return error_response(reason="Invalid JSON request", status_code=400)
+
+        entity_id = parameters.get("entityId")
         logger.debug(f"Processing request to retrieve entity {entity_id}")
 
         with world_lock:
@@ -75,44 +117,7 @@ def get_entity(entity_id):
                     status_code=404,
                 )
 
-            entity_info = {
-                "entityId": entity_id,
-                "components": {},
-            }
-
-            import importlib
-
-            entity_components = importlib.import_module("server.entity_components")
-            component_types = [
-                getattr(entity_components, class_name)
-                for class_name in dir(entity_components)
-                if not class_name.startswith("__")
-                and isinstance(getattr(entity_components, class_name), type)
-            ]
-            component_mapping = {
-                class_object: (
-                    class_object.__name__,
-                    [
-                        field.name
-                        for field in class_object.__dataclass_fields__.values()
-                    ],
-                )
-                for class_object in component_types
-            }
-
-            for component_type, (key, fields) in component_mapping.items():
-                if esper.has_component(entity_id, component_type):
-                    component_value = esper.component_for_entity(
-                        entity_id, component_type
-                    )
-                    entity_info["components"][key] = {
-                        "".join(
-                            x.capitalize() if i > 0 else x.lower()
-                            for i, x in enumerate(field.split("_"))
-                        ): getattr(component_value, field)
-                        for field in fields
-                    }
-
+            entity_info = get_entity_components(entity_id)
             return success_response(data=entity_info)
 
     except Exception as exception:
@@ -125,6 +130,7 @@ def get_entity(entity_id):
 
 
 def validate_transform_data(component_data):
+    logger.debug("Validating transform data")
     if not isinstance(component_data, dict):
         return False, "Transform data must be an object"
 
@@ -132,6 +138,9 @@ def validate_transform_data(component_data):
     allowed_fields = {"position", "rotation", "scale"}
     unexpected_fields = set(component_data.keys()) - allowed_fields
     if unexpected_fields:
+        logger.warning(
+            f"Unexpected fields in transform data: {', '.join(unexpected_fields)}"
+        )
         return (
             False,
             f"Unexpected fields in transform data: {', '.join(unexpected_fields)}",
@@ -165,6 +174,7 @@ def validate_transform_data(component_data):
 
 
 def validate_script_data(component_data):
+    logger.debug("Validating script data")
     script_path = component_data.get("scriptPath")
     if not script_path:
         return False, "Script path is required"
@@ -178,14 +188,43 @@ def validate_script_data(component_data):
     return True, None
 
 
+def validate_renderer_data(component_data):
+    logger.debug("Validating renderer data")
+    if not isinstance(component_data, dict):
+        return False, "Renderer data must be an object"
+
+    file_path = component_data.get("filePath")
+    if not file_path:
+        return False, "File path is required"
+    if not isinstance(file_path, str):
+        return False, "File path must be a string"
+    if not os.path.isfile(file_path):
+        return False, "File path must point to a valid file"
+    supported_extensions = [".obj", ".fbx", ".dae", ".gltf", ".glb"]
+    if not any(file_path.endswith(extension) for extension in supported_extensions):
+        return (
+            False,
+            f"File path must have a supported extension ({', '.join(supported_extensions)})",
+        )
+
+    return True, None
+
+
 # Validate the request body for adding a component to an entity
 def validate_add_component_to_entity_request(parameters):
+    logger.debug("Validating add component to entity request")
     if not isinstance(parameters, dict):
         return False, "Request body must be a JSON object"
 
+    entity_id = parameters.get("entityId")
+    if not entity_id:
+        return False, "Entity ID is required"
+    if not isinstance(entity_id, int):
+        return False, "Entity ID must be an integer"
+
     component_type = parameters.get("type")
-    # TODO: When a new component is added, add it to the allowed_component_types list
-    allowed_component_types = ["transform", "script"]
+    # FIXME: Get allowed component types from the entity_components module
+    allowed_component_types = ["transform", "script", "renderer"]
     if not component_type:
         return False, "Component type is required"
     if not isinstance(component_type, str):
@@ -200,40 +239,42 @@ def validate_add_component_to_entity_request(parameters):
     if not component_data:
         return False, "Component data is required"
 
-    # TODO: When a new component is added, add its validation function to the validation_functions dictionary
     validation_functions = {
-        "transform": validate_transform_data,
-        "script": validate_script_data,
+        component_type: globals()[f"validate_{component_type}_data"]
+        for component_type in allowed_component_types
     }
 
     is_valid, error_message = validation_functions[component_type](component_data)
     if not is_valid:
+        logger.warning(f"Validation failed for {component_type}: {error_message}")
         return False, error_message
 
     return True, None
 
 
 # Handle adding a transform component to an entity
-def handle_transform_component(entity_id, component_data):
-    position = component_data.get("position")
-    rotation = component_data.get("rotation")
-    scale = component_data.get("scale")
-
-    with world_lock:
-        if not esper.entity_exists(entity_id):
-            return error_response(
-                reason=f"Entity {entity_id} not found", status_code=404
+def handle_transform_component(entity_id, transform: Transform):
+    logger.info(f"Handling transform component for entity {entity_id}")
+    try:
+        with world_lock:
+            logger.info(f"Acquired lock for entity {entity_id}")
+            esper.add_component(entity_id, transform)
+            logger.info(f"Successfully added transform component to entity {entity_id}")
+            return success_response(
+                data=esper.component_for_entity(entity_id, Transform)
             )
-
-        esper.add_component(entity_id, Transform(position, rotation, scale))
-        return success_response(data=esper.component_for_entity(entity_id, Transform))
+    except Exception as exception:
+        logger.error(
+            f"Error handling transform component for entity {entity_id}: {exception}"
+        )
 
 
 # Handle adding a script component to an entity
-def handle_script_component(entity_id, component_data):
-    global script_modules  # Declare the global variable
+def handle_script_component(entity_id, script: Script):
+    logger.info(f"Handling script component for entity {entity_id}")
+    global scripts  # Declare the global variable
 
-    script_path = component_data.get("scriptPath")
+    script_path = script.script_path
     logger.info(f"Loading script at {script_path} for entity {entity_id}")
 
     # Extract the script name without the extension to create a meaningful module name
@@ -244,75 +285,185 @@ def handle_script_component(entity_id, component_data):
     script_module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(script_module)
 
-    if not esper.has_component(entity_id, Script):
-        esper.add_component(entity_id, Script(script_path))
-    else:
-        logger.warning(f"Script component already exists for entity {entity_id}")
+    try:
+        with world_lock:
+            if not esper.has_component(entity_id, Script):
+                esper.add_component(entity_id, Script(script_path))
+                logger.info(f"Script component added for entity {entity_id}")
+            else:
+                logger.warning(
+                    f"Script component already exists for entity {entity_id}"
+                )
+                return error_response(
+                    reason=f"Script component already exists for entity {entity_id}",
+                    status_code=400,
+                )
 
-    logger.info(f"Script loaded: {script_name}")
+        logger.info(f"Script loaded: {script_name}")
+        
+        script_info = {}
 
-    # Check if the on_load function exists
-    if hasattr(script_module, "on_load"):
-        logger.debug(f"Script on_load function is found at: {script_module.on_load}")
+        # Check if the on_load function exists
+        if hasattr(script_module, "on_load"):
+            logger.debug(
+                f"Script on_load function is found at: {script_module.on_load}"
+            )
 
-        script_module.on_load()
+            script_module.on_load(entity_id)
 
-        # Create a dictionary to hold the script path and module
-        script_info = {"path": script_path, "module": script_module}
+            # Create a dictionary to hold the script path and module
+            script_info = {"path": script_path, "module": script_module}
 
-        # Append the dictionary to the global list in a thread-safe manner
-        with script_modules_lock:  # Acquire the lock
-            script_modules.append(script_info)  # Modify the list safely
+            # Append the dictionary to the global list in a thread-safe manner
+            
+        if hasattr(script_module, "on_update"):
+            logger.debug(
+                f"Script on_update function is found at: {script_module.on_update}"
+            )
+
+            # TODO: Make this a global timer that can be stopped and started
+            timer = vispy.app.Timer(interval=1/60, connect=script_module.on_update, start=True)  # 60 FPS callback
+            script_info["timer"] = timer
+            if "entityIds" not in script_info:
+                script_info["entityIds"] = []
+            script_info["entityIds"].append(entity_id)
+            
+        with scripts_lock:  # Acquire the lock
+            scripts.append(script_info)  # Modify the list safely
 
         return success_response()
-    else:
-        logger.error(f"No on_load function found in {script_path}")
+    except KeyError:
         return error_response(
-            reason=f"No on_load function found in {script_path}", status_code=400
+            reason=f"Entity {entity_id} does not exist", status_code=404
         )
 
 
-@app.route("/add_component_to_entity/<int:entity_id>", methods=["POST"])
-def add_component_to_entity(entity_id):
-    """Add a component to an existing entity.
+def handle_renderer_component(entity_id, renderer: Renderer):
+    logger.info(f"Handling renderer component for entity {entity_id}")
+    file_path = renderer.file_path
 
-    This endpoint accepts a JSON payload with the component type and its parameters,
-    and adds the specified component to the entity.
+    # Validate that scene_path is provided
+    if file_path is None:
+        return error_response(reason="File path is required", status_code=400)
 
-    Request JSON payload is expected to contain the following fields:
-    - type (str): The type of the component to add.
-    - data (dict): The data for the component to add, specific to the component type.
+    logger.info(f"Loading scene from {file_path} for entity {entity_id}")
 
-    For example, to add a transform component to an entity, the request body should look like this:
-    ```json
-    {
-        "type": "transform",
-        "data": {
-            "position": [1, 2, 3],
-            "rotation": [0, 0, 0],
-            "scale": [1, 1, 1]
+    try:
+        from vispy import io
+        from vispy import scene
+        from server.configuration import view
+
+        # Check if the path is a valid file
+        if not os.path.isfile(file_path):
+            return error_response(
+                reason="File path must point to a valid file", status_code=400
+            )
+
+        # Read mesh data
+        vertices, faces, normals, _ = io.read_mesh(file_path)
+        mesh = scene.visuals.Mesh(vertices, faces, normals, shading='smooth', color=(0.6, 0.6, 1, 1), parent=view.scene)
+
+        from vispy.visuals.transforms import MatrixTransform
+        mesh.transform = MatrixTransform()
+        with meshes_lock:
+            meshes.append({
+                "entityId": entity_id,
+                "filePath": file_path,
+                "meshObject": mesh,
+            })
+
+        # Check if vertices and faces are valid
+        if len(vertices) == 0 or len(faces) == 0:  # Check if arrays are empty
+            logger.error("Mesh data is empty or invalid")
+            return error_response(reason="Invalid mesh data", status_code=400)
+
+        logger.info(
+            f"Mesh contains {len(faces)} faces, {len(vertices)} vertices and {len(normals)} normals"
+        )
+
+        with world_lock:
+            if not esper.entity_exists(entity_id):
+                return error_response(
+                    reason=f"Entity {entity_id} not found", status_code=404
+                )
+
+            esper.add_component(entity_id, renderer)
+            logger.info(f"Successfully added renderer component to entity {entity_id}")
+            return success_response(
+                data=esper.component_for_entity(entity_id, Renderer)
+            )
+
+    except Exception as exception:
+        logger.error(
+            f"Failed to load scene from {file_path}: {exception}", exc_info=True
+        )
+        return error_response(reason="Failed to load scene data", status_code=500)
+
+
+def add_component_to_entity(entity_id, component):
+    """Add a component to an existing entity."""
+    logger.info(f"Attempting to add component to entity {entity_id}")
+
+    try:
+        if not esper.entity_exists(entity_id):
+            raise ValueError(f"Entity {entity_id} not found")
+
+        import server.entity_components as components  # Import the module
+
+        component_classes = [
+            getattr(components, class_name)
+            for class_name in dir(components)
+            if isinstance(getattr(components, class_name), type)
+            and class_name != "CoreProperties"
+        ]  # Acquire list of all class types from server.entity_components
+        component_handlers = {
+            component_class: globals()[
+                f"handle_{component_class.__name__.lower()}_component"
+            ]
+            for component_class in component_classes
         }
-    }
-    ```
 
-    To add a script component to an entity, the request body should look like this:
-    ```json
-    {
-        "type": "script",
-        "data": {
-            "scriptPath": "/absolute/path/to/script.py"
+        handler = component_handlers.get(type(component))
+        if handler:
+            handler(entity_id, component)
+        else:
+            raise ValueError(
+                f"Component is not of the supported types: {', '.join(component_handlers.keys())}"
+            )
+    except Exception as exception:
+        logger.error(
+            f"Error adding component to entity {entity_id}: {exception}",
+            exc_info=True,
+        )
+        raise exception
+
+
+def camel_to_snake(name):
+    """Convert camelCase to snake_case."""
+    logger.debug(f"Converting '{name}' from camelCase to snake_case")
+    return re.sub("([a-z0-9])([A-Z])", r"\1_\2", name).lower()
+
+
+def convert_keys_to_snake_case(data):
+    """Convert all keys in a dictionary from camelCase to snake_case."""
+    logger.debug("Converting keys to snake_case")
+    if isinstance(data, dict):
+        return {
+            camel_to_snake(k): convert_keys_to_snake_case(v) for k, v in data.items()
         }
-    }
-    ```
+    elif isinstance(data, list):
+        return [convert_keys_to_snake_case(item) for item in data]
+    else:
+        return data
 
-    Args:
-        entity_id (int): The ID of the entity to which the component will be added.
 
-    Returns:
-        JSON response indicating the result of the operation.
-    """
+@flask_app.route("/add_component_to_entity", methods=["POST"])
+def add_component_to_entity_endpoint():
+    """Add a component to an existing entity."""
+    logger.info("Endpoint '/add_component_to_entity' called")
     try:
         parameters = request.json
+        logger.debug(f"Request data: {parameters}")
         if parameters is None:
             return error_response(reason="Invalid JSON request", status_code=400)
 
@@ -320,44 +471,33 @@ def add_component_to_entity(entity_id):
         if not is_valid:
             return error_response(reason=error_message, status_code=400)
 
+        entity_id = parameters.get("entityId")
         component_type = parameters.get("type")
         component_data = parameters.get("data")
 
-        # TODO: When a new component is added, add it to the component_types_association dictionary
+        # Component types association
         component_types_association = {
             "transform": Transform,
             "script": Script,
+            "renderer": Renderer,
         }
 
-        for component_type in component_types_association:
-            if esper.has_component(
-                entity_id, component_types_association[component_type]
-            ):
-                return error_response(
-                    reason=f"Component {component_type} already exists for entity {entity_id}",
-                    status_code=400,
-                )
-
-        if not esper.entity_exists(entity_id):
+        component_type = component_types_association.get(component_type)
+        if component_type is None:
             return error_response(
-                reason=f"Entity {entity_id} not found, can't add component {component_type} to it",
-                status_code=404,
+                reason=f"Unsupported component type: {component_type}", status_code=400
             )
 
-        # TODO: When a new component is added, add it to the component_handlers dictionary
-        component_handlers = {
-            "transform": handle_transform_component,
-            "script": handle_script_component,
-        }
+        component_data = convert_keys_to_snake_case(component_data)
+        component = component_type(**component_data)
+        add_component_to_entity(entity_id, component)
 
-        if component_type in component_handlers:
-            return component_handlers[component_type](entity_id, component_data)
+        return success_response()
 
-        return error_response(
-            reason=f"Unsupported component type: {component_type}", status_code=400
-        )
-
+    except ValueError as value_error:
+        return error_response(reason=str(value_error), status_code=404)
     except Exception as exception:
+        entity_id = request.json.get("entityId")
         logger.error(
             f"Error adding component to entity {entity_id}: {str(exception)}",
             exc_info=True,
@@ -365,19 +505,36 @@ def add_component_to_entity(entity_id):
         return error_response(reason=str(exception), status_code=500)
 
 
-@app.route("/create_entity", methods=["POST"])
-def create_entity():
+def create_entity(name, target_scene, tags):
+    """Create a new base entity locally."""
+    logger.info(f"Creating entity with name: {name}")
+    base_entity_component = CoreProperties(
+        name=name,
+        tags=tags,
+        target_scene=target_scene,
+    )
+    return esper.create_entity(base_entity_component)
+
+
+@flask_app.route("/create_entity", methods=["POST"])
+def create_entity_endpoint():
     """Create a new base entity.
 
-    JSON payload is expected to contain the following fields:
-    - name (str): The name of the entity.
-    - targetScene (str): The target scene for the entity.
-    - tags (list): A list of tags for the entity.
+    JSON payload is expected to contain the following fields for example:
+    ```json
+    {
+        "name": "entity_name",
+        "targetScene": "target_scene",
+        "tags": ["tag1", "tag2"]
+    }
+    ```
 
     Returns:
         JSON response indicating the result of the operation.
     """
+    logger.info("Endpoint '/create_entity' called")
     parameters = request.json
+    logger.debug(f"Request data: {parameters}")
     if parameters is None:
         return error_response(
             reason="Invalid JSON request, expected application/json", status_code=415
@@ -393,55 +550,78 @@ def create_entity():
         )
 
     with world_lock:
-        base_entity_component = CoreProperties(
-            name=name_data,
-            tags=tags_data,
-            target_scene=target_scene_data,
-        )
-        entity_id = esper.create_entity(base_entity_component)
+        entity_id = create_entity(name_data, target_scene_data, tags_data)
         return success_response(data={"entityId": entity_id})
 
 
-@app.route("/remove_entity/<int:entity_id>", methods=["DELETE"])
 def remove_entity(entity_id):
+    """Remove an existing entity locally."""
+    logger.info(f"Attempting to remove entity {entity_id}")
+    global meshes  # Declare the global variable
+    global scripts
+    
+    with world_lock:
+        if not esper.entity_exists(entity_id):
+            raise ValueError(f"Entity {entity_id} not found")
+
+        esper.delete_entity(entity_id)
+        with meshes_lock:
+            meshes_to_remove = [mesh for mesh in meshes if mesh["entityId"] == entity_id]
+            for mesh in meshes_to_remove:
+                from vispy.visuals.transforms import MatrixTransform
+                mesh["meshObject"].parent = None
+                mesh["meshObject"].transform = MatrixTransform()
+            meshes = [mesh for mesh in meshes if mesh["entityId"] != entity_id]  # Update the global meshes list
+            
+        with scripts_lock:
+            scripts_to_remove = [script for script in scripts if entity_id in script["entityIds"]]
+            for script in scripts_to_remove:
+                script["timer"].stop()
+                script["timer"].disconnect()
+                script["entityIds"].remove(entity_id)
+            scripts = [script for script in scripts if entity_id not in script["entityIds"]]  # Update the global scripts list
+
+        logger.info(f"Successfully removed entity {entity_id}")
+
+
+@flask_app.route("/remove_entity", methods=["DELETE"])
+def remove_entity_endpoint():
     """Remove an existing entity.
 
     This endpoint removes the specified entity from the system.
 
-    Request JSON payload is empty.
-
-    Args:
-        entity_id (int): The ID of the entity to remove.
+    Request JSON payload is for example:
+    ```json
+    {
+        "entityId": 1
+    }
+    ```
 
     Returns:
         JSON response indicating the result of the operation.
     """
-    with world_lock:
-        if not esper.entity_exists(entity_id):
-            return error_response(
-                reason=f"Entity {entity_id} not found", status_code=404
-            )
+    logger.info("Endpoint '/remove_entity' called")
+    parameters = request.json
+    entity_id = parameters.get("entityId")
 
-        esper.delete_entity(entity_id)
+    if entity_id is None:
+        return error_response(reason="entityId is required", status_code=400)
+
+    try:
+        remove_entity(entity_id)
+        logger.info(f"Successfully removed entity {entity_id}")
         return success_response()
+    except ValueError as value_error:
+        return error_response(reason=str(value_error), status_code=404)
+    except Exception as exception:
+        logger.error(
+            f"Error removing entity {entity_id}: {str(exception)}",
+            exc_info=True,
+        )
+        return error_response(reason=str(exception), status_code=500)
 
 
-@app.route("/shutdown", methods=["POST"])
-def shutdown():
-    """Shutdown the Flask server.
-
-    This endpoint shuts down the server.
-
-    Request JSON payload is empty.
-
-    Returns:
-        JSON response indicating the result of the operation.
-    """
-    threading.Thread(target=pyglet.app.exit).start()
-    return success_response()
-
-
-@app.route("/status", methods=["GET"])
+@flask_app.route("/status", methods=["GET"])
 def status():
     """Check the server status.
 
@@ -450,6 +630,7 @@ def status():
     Returns:
         JSON response indicating the result of the operation.
     """
+    logger.info("Endpoint '/status' called")
     return success_response()
 
 
@@ -480,7 +661,7 @@ def handle_status_request():
         )
 
 
-@app.route("/reset", methods=["POST"])
+@flask_app.route("/reset", methods=["POST"])
 def reset():
     """Reset the server state.
 
@@ -491,9 +672,10 @@ def reset():
     Returns:
         JSON response indicating the result of the operation.
     """
+    logger.info("Endpoint '/reset' called")
     try:
         with world_lock:
-            # Clear all entities from the esper world
+            logger.info("Clearing the database")
             esper.clear_database()  # Assuming this function exists to clear all entities
 
         return success_response()

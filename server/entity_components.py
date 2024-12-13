@@ -6,7 +6,9 @@ allowing for modular and flexible entity definitions.
 """
 
 from dataclasses import dataclass
-from typing import List
+from typing import List, Any
+import numpy as np
+import vispy.scene.visuals
 
 
 @dataclass
@@ -32,3 +34,10 @@ class Script:
     """Represents a script component that references a Python script to be executed."""
 
     script_path: str  # Path to the script to be executed
+
+
+@dataclass
+class Renderer:
+    """Represents the renderer component containing scene data loaded from Assimp."""
+
+    file_path: str  # Path to the scene file

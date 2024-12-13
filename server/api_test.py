@@ -1,9 +1,10 @@
 import unittest
-from server.api import app
+from server.api import flask_app
+
 
 class APITestCase(unittest.TestCase):
     def setUp(self):
-        self.app = app.test_client()
+        self.app = flask_app.test_client()
         self.app.testing = True
         self.reset_server()
 
@@ -64,24 +65,27 @@ class APITestCase(unittest.TestCase):
             },  # Non-numeric position
         ]
         for case in invalid_cases:
-            response = self.app.post("/add_component_to_entity/1", json=case)
+            response = self.app.post(
+                "/add_component_to_entity", json={"entityId": 1, **case}
+            )
             self.assertEqual(response.status_code, 400)
 
     def test_remove_entity_twice(self):
         # First removal
-        response = self.app.delete("/remove_entity/1")
+        response = self.app.delete("/remove_entity", json={"entityId": 1})
         self.assertEqual(
             response.status_code, 404
         )  # Should be 404 since it doesn't exist
 
         # Attempt to remove again
-        response = self.app.delete("/remove_entity/1")
+        response = self.app.delete("/remove_entity", json={"entityId": 1})
         self.assertEqual(response.status_code, 404)  # Should still be 404
 
     def test_add_component_to_nonexistent_entity(self):
         response = self.app.post(
-            "/add_component_to_entity/999999",
+            "/add_component_to_entity",
             json={
+                "entityId": 999999,
                 "type": "transform",
                 "data": {
                     "position": [0.0, 0.0, 0.0],
@@ -111,8 +115,9 @@ class APITestCase(unittest.TestCase):
 
         # Add component
         add_component_response = self.app.post(
-            f"/add_component_to_entity/{entity_id}",
+            "/add_component_to_entity",
             json={
+                "entityId": entity_id,
                 "type": "transform",
                 "data": {
                     "position": [1.0, 2.0, 3.0],
@@ -123,8 +128,10 @@ class APITestCase(unittest.TestCase):
         )
         self.assertEqual(add_component_response.status_code, 200)
 
-        # Get entity
-        get_response = self.app.get(f"/get_entity/{entity_id}")
+        # Get entity components
+        get_response = self.app.get(
+            f"/get_entity_components", json={"entityId": entity_id}
+        )
         self.assertEqual(get_response.status_code, 200)
         entity_data = get_response.get_json()["data"]
         self.assertEqual(
@@ -132,17 +139,17 @@ class APITestCase(unittest.TestCase):
         )
 
         # Remove entity
-        remove_response = self.app.delete(f"/remove_entity/{entity_id}")
+        remove_response = self.app.delete(
+            f"/remove_entity", json={"entityId": entity_id}
+        )
         self.assertEqual(remove_response.status_code, 200)
 
         # Verify entity is gone
-        get_response_after = self.app.get(f"/get_entity/{entity_id}")
+        get_response_after = self.app.get(
+            f"/get_entity_components", json={"entityId": entity_id}
+        )
         self.assertEqual(get_response_after.status_code, 404)
 
     def test_reset_server_state(self):
         response = self.app.post("/reset")
         self.assertEqual(response.status_code, 200)  # Ensure reset works
-
-    def test_shutdown_server(self):
-        response = self.app.post("/shutdown")
-        self.assertEqual(response.status_code, 200)  # Ensure shutdown works
